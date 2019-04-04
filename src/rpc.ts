@@ -209,15 +209,19 @@ export class MaintenanceClient {
     return this.client.exec('Maintenance', 'defragment', {}, options);
   }
   /**
-   * Hash computes the hash of the KV's backend.
-   * This is designed for testing; do not use this in production when there
-   * are ongoing transactions.
+   * Hash computes the hash of whole backend keyspace,
+   * including key, lease, and other buckets in storage.
+   * This is designed for testing ONLY!
+   * Do not rely on this in production with ongoing transactions,
+   * since Hash operation does not hold MVCC locks.
+   * Use "HashKV" API instead for "key" bucket consistency checks.
    */
   public hash(options?: grpc.CallOptions): Promise<IHashResponse> {
     return this.client.exec('Maintenance', 'hash', {}, options);
   }
   /**
    * HashKV computes the hash of all MVCC keys up to a given revision.
+   * It only iterates "key" bucket in backend storage.
    */
   public hashKV(req: IHashKVRequest, options?: grpc.CallOptions): Promise<IHashKVResponse> {
     return this.client.exec('Maintenance', 'hashKV', req, options);
@@ -390,6 +394,9 @@ export interface IResponseHeader {
   member_id: string;
   /**
    * revision is the key-value store revision when the request was applied.
+   * For watch progress responses, the header.revision indicates progress. All future events
+   * recieved in this stream are guaranteed to have a higher revision number than the
+   * header.revision number.
    */
   revision: string;
   /**
@@ -479,7 +486,7 @@ export interface IRangeRequest {
   max_mod_revision?: string | number;
   /**
    * min_create_revision is the lower bound for returned key create revisions; all keys with
-   * lesser create trevisions will be filtered away.
+   * lesser create revisions will be filtered away.
    */
   min_create_revision?: string | number;
   /**
@@ -766,6 +773,18 @@ export interface IWatchCreateRequest {
    * If the previous KV is already compacted, nothing will be returned.
    */
   prev_kv?: boolean;
+  /**
+   * If watch_id is provided and non-zero, it will be assigned to this watcher.
+   * Since creating a watcher in etcd is not a synchronous operation,
+   * this can be used ensure that ordering is correct when creating multiple
+   * watchers on the same stream. Creating a watcher with an ID already in
+   * use on the stream will cause an error to be returned.
+   */
+  watch_id?: string | number;
+  /**
+   * fragment enables splitting large revisions into multiple watch responses.
+   */
+  fragment?: boolean;
 }
 export interface IWatchCancelRequest {
   /**
@@ -791,16 +810,30 @@ export interface IWatchResponse {
    * No further events will be sent to the canceled watcher.
    */
   canceled: boolean;
+  /**
+   * compact_revision is set to the minimum index if a watcher tries to watch
+   * at a compacted index.
+   *
+   * This happens when creating a watcher at a compacted revision or the watcher cannot
+   * catch up with the progress of the key-value store.
+   *
+   * The client should treat the watcher as canceled and should not try to create any
+   * watcher with the same start_revision again.
+   */
   compact_revision: string;
   /**
    * cancel_reason indicates the reason for canceling the watcher.
    */
   cancel_reason: string;
+  /**
+   * framgment is true if large watch response was split over multiple responses.
+   */
+  fragment: boolean;
   events: IEvent[];
 }
 export interface ILeaseGrantRequest {
   /**
-   * TTL is the advisory time-to-live in seconds.
+   * TTL is the advisory time-to-live in seconds. Expired lease will return -1.
    */
   TTL?: string | number;
   /**
@@ -828,6 +861,22 @@ export interface ILeaseRevokeRequest {
 }
 export interface ILeaseRevokeResponse {
   header: IResponseHeader;
+}
+export interface ILeaseCheckpoint {
+  /**
+   * ID is the lease ID to checkpoint.
+   */
+  ID?: string | number;
+  /**
+   * Remaining_TTL is the remaining time until expiry of the lease.
+   */
+  remaining_TTL?: string | number;
+}
+export interface ILeaseCheckpointRequest {
+  checkpoints?: ILeaseCheckpoint[];
+}
+export interface ILeaseCheckpointResponse {
+  header?: IResponseHeader;
 }
 export interface ILeaseKeepAliveRequest {
   /**
@@ -1026,7 +1075,7 @@ export interface IStatusResponse {
    */
   version: string;
   /**
-   * dbSize is the size of the backend database, in bytes, of the responding member.
+   * dbSize is the size of the backend database physically allocated, in bytes, of the responding member.
    */
   dbSize: string;
   /**
@@ -1034,13 +1083,25 @@ export interface IStatusResponse {
    */
   leader: string;
   /**
-   * raftIndex is the current raft index of the responding member.
+   * raftIndex is the current raft committed index of the responding member.
    */
   raftIndex: string;
   /**
    * raftTerm is the current raft term of the responding member.
    */
   raftTerm: string;
+  /**
+   * raftAppliedIndex is the current raft applied index of the responding member.
+   */
+  raftAppliedIndex: string;
+  /**
+   * errors contains alarm/health information and status.
+   */
+  errors: string[];
+  /**
+   * dbSizeInUse is the size of the backend database logically in use, in bytes, of the responding member.
+   */
+  dbSizeInUse: string;
 }
 export interface IAuthenticateRequest {
   name?: string;
@@ -1107,8 +1168,8 @@ export interface IAuthRoleGrantPermissionRequest {
 }
 export interface IAuthRoleRevokePermissionRequest {
   role?: string;
-  key?: string;
-  range_end?: string;
+  key?: Buffer;
+  range_end?: Buffer;
 }
 export interface IAuthEnableResponse {
   header: IResponseHeader;

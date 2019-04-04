@@ -187,7 +187,7 @@ export class Lease extends EventEmitter {
         stream.on('error', err => reject(castGrpcError(err)));
         stream.write({ ID: id });
       }).then(res => {
-        stream.end();
+        stream.cancel();
         if (leaseExpired(res)) {
           const err = new EtcdLeaseInvalidError(res.ID);
           this.emitLoss(err);
@@ -293,7 +293,7 @@ export class Lease extends EventEmitter {
       .leaseKeepAlive()
       .then(stream => {
         if (this.state !== State.Alive) {
-          return stream.end();
+          return stream.cancel();
         }
 
         const keepaliveTimer = setInterval(() => this.fireKeepAlive(stream), 1000 * this.ttl / 3);
@@ -301,12 +301,16 @@ export class Lease extends EventEmitter {
         this.teardown = () => {
           this.teardown = () => undefined;
           clearInterval(keepaliveTimer);
-          stream.end();
+          stream.cancel();
         };
 
-        stream.on('error', err => this.handleKeepaliveError(err)).on('data', res => {
+        stream.on('error', err => {
+          this.handleKeepaliveError(err);
+        });
+
+        stream.on('data', res => {
           if (leaseExpired(res)) {
-            return this.handleKeepaliveError(new EtcdLeaseInvalidError(res.ID));
+            return stream.cancel();
           }
 
           this.lastKeepAlive = Date.now();

@@ -66,8 +66,8 @@ export class Role {
     return this.client
       .roleRevokePermission({
         role: this.name,
-        key: range.start.toString(),
-        range_end: range.end.toString(),
+        key: range.start,
+        range_end: range.end,
       })
       .then(() => this);
   }
